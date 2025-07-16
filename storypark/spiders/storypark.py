@@ -5,6 +5,8 @@ import re
 
 from scrapy import Spider
 from scrapy.http import Request, Response
+from scrapy.spidermiddlewares.httperror import HttpError
+from twisted.python.failure import Failure
 
 from storypark.items import StoryparkItem
 
@@ -68,6 +70,7 @@ class StoryPark(Spider):
                     continue
 
                 media_url = media['original_url']
+                backup_url = media['resized_url']
                 file_name = f'{str(index).zfill(2)}{file_ext}'
                 filename = os.path.join(self.root_path, dir_name, file_name)
                 filename = emoji_pattern.sub(r'', filename)
@@ -78,8 +81,9 @@ class StoryPark(Spider):
                 yield Request(
                     url=media_url,
                     callback=self._download_item,
-                    meta={'filename': filename},
+                    meta={'filename': filename, 'backup_url': backup_url},
                     cookies=response.request.cookies,
+                    errback=self._fallback_to_backup_url,
                 )
 
         if next_page_token:
@@ -91,6 +95,26 @@ class StoryPark(Spider):
                 cookies=response.request.cookies,
                 meta=response.meta,
             )
+
+    def _fallback_to_backup_url(self, failure: Failure):
+        if failure.check(HttpError):
+            value: HttpError = failure.value
+            if value.response.status == 403:
+                response = value.response
+                meta = response.request.meta.copy()
+                backup_url = meta.pop('backup_url', "")
+                if backup_url:
+                    yield Request(
+                        url=backup_url,
+                        callback=self._download_item,
+                        meta=meta,
+                        cookies=response.request.cookies,
+                    )
+                    return
+
+        failure.raiseException()
+
+
 
     def _download_item(self, response: Response):
         filename = response.meta['filename']
@@ -109,4 +133,5 @@ class StoryPark(Spider):
 file_exts = {
     'image/jpeg': '.jpg',
     'video/mp4': '.mp4',
+    'video/quicktime': '.mov',
 }
